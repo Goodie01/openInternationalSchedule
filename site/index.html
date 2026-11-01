@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>The Open World Swing Dance Championships: Schedule in Your Time Zone</title>
+    <meta name="description"
+          content="The Open (US Open Swing) weekend schedule, converted from Los Angeles time to your local time zone.">
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+    <h1>The Open <span>World Swing Dance Championships</span></h1>
+    <p class="lede">The weekend schedule, shown in your time zone. The official schedule uses Los Angeles time.</p>
+
+    <form class="controls" id="controls" autocomplete="off">
+        <label class="tz-field">
+            <span>Time zone</span>
+            <input id="tz" list="tz-options" spellcheck="false" aria-describedby="tz-status">
+            <datalist id="tz-options"></datalist>
+        </label>
+        <button type="button" id="tz-local">Use my time zone</button>
+        <label class="clock-field">
+            <span>Clock</span>
+            <select id="clock">
+                <option value="auto">Auto</option>
+                <option value="12">12-hour</option>
+                <option value="24">24-hour</option>
+            </select>
+        </label>
+    </form>
+    <p class="tz-status" id="tz-status" aria-live="polite"></p>
+</header>
+
+<main id="schedule" aria-live="polite">
+    <p class="loading">Loading schedule…</p>
+</main>
+
+<footer class="site-footer" id="footer">
+    <p>
+        Unofficial conversion of the
+        <a href="https://theopenswing.com/schedules/">official schedule</a>. Always check the
+        <a id="pdf-link" href="https://theopenswing.com/schedules/">original PDF</a> and on-site announcements, because
+        the schedule can change during the event.
+    </p>
+    <p id="freshness"></p>
+</footer>
+</body>
+</html>

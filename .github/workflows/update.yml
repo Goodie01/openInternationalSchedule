@@ -1,0 +1,97 @@
+name: Update schedule
+
+on:
+  schedule:
+    # Daily, off the hour to avoid GitHub's top-of-hour queueing. 09:17 UTC is ~1-2 AM in Los Angeles.
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  FAILURE_LABEL: schedule-parse-failure
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          ./mvnw -B -ntp package 2>&1 | tee -a "$RUNNER_TEMP/run.log"
+
+      - name: Fetch and parse the schedule
+        run: |
+          set -o pipefail
+          java -jar target/schedule.jar --out site/schedule.json 2>&1 | tee -a "$RUNNER_TEMP/run.log"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      # A failed run deploys nothing, so the last good schedule stays live. Open (or bump) one issue so it gets seen.
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create "$FAILURE_LABEL" --color B60205 \
+            --description "The daily schedule update failed" --force
+          {
+            echo "The schedule update failed on **${GITHUB_EVENT_NAME}** ([run]($RUN_URL)). The site still shows the last schedule that parsed successfully."
+            echo
+            echo "If the PDF layout changed, update the parser and add the new PDF as a test fixture."
+            echo
+            echo '```'
+            grep -v '^\[INFO\] Download' "$RUNNER_TEMP/run.log" 2>/dev/null | tail -n 60 || echo "(no log captured)"
+            echo '```'
+          } > "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --label "$FAILURE_LABEL" --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "Schedule update failing" --label "$FAILURE_LABEL" \
+              --body-file "$RUNNER_TEMP/issue.md"
+          fi
+
+      - name: Close failure issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for n in $(gh issue list --label "$FAILURE_LABEL" --state open --json number --jq '.[].number' 2>/dev/null); do
+            gh issue close "$n" --comment "Fixed: [this run]($RUN_URL) parsed and published the schedule."
+          done
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
