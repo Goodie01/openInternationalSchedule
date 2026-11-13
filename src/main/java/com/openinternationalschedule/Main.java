@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.HexFormat;
 import java.util.List;
 
@@ -74,13 +75,18 @@ public final class Main {
     }
 
     static Schedule parse(byte[] pdf, ScheduleSource source) throws IOException {
+        return parse(pdf, source, LocalDate.now(ScheduleBuilder.SOURCE_ZONE));
+    }
+
+    /** @param today reference date for working out the year of day headers that don't print one */
+    static Schedule parse(byte[] pdf, ScheduleSource source, LocalDate today) throws IOException {
         List<RawRow> rows;
         try (PDDocument doc = PDDocument.load(pdf)) {
             rows = PdfTableParser.parse(doc);
         } catch (IOException e) {
             throw new ScheduleParseException("Could not read the schedule PDF", e);
         }
-        ScheduleBuilder.Result result = ScheduleBuilder.build(rows);
+        ScheduleBuilder.Result result = ScheduleBuilder.build(rows, today);
         Validator.validate(result);
         return new Schedule(
                 Instant.now(),

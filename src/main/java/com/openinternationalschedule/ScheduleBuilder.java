@@ -1,12 +1,17 @@
 package com.openinternationalschedule;
 
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.MonthDay;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -20,7 +25,13 @@ public final class ScheduleBuilder {
     public static final ZoneId SOURCE_ZONE = ZoneId.of("America/Los_Angeles");
 
     /** Parsing the weekday as well makes java.time reject a header whose weekday doesn't match its date. */
-    private static final DateTimeFormatter DAY_HEADER = DateTimeFormatter.ofPattern("EEEE, MMMM d, uuuu", Locale.US);
+    private static final DateTimeFormatter DAY_HEADER = new DateTimeFormatterBuilder()
+            .parseCaseInsensitive().appendPattern("EEEE, MMMM d, uuuu").toFormatter(Locale.US);
+    /** Headers like "WEDNESDAY, NOVEMBER 25" leave the year to be worked out from the weekday. */
+    private static final DateTimeFormatter DAY_HEADER_NO_YEAR = new DateTimeFormatterBuilder()
+            .parseCaseInsensitive().appendPattern("EEEE, MMMM d").toFormatter(Locale.US);
+    /** An end time printed in the event text rather than the time column, e.g. "Late Night Dancing (Until 3:00 AM)". */
+    private static final Pattern UNTIL = Pattern.compile("\\s*\\(until\\s+([^)]+)\\)", Pattern.CASE_INSENSITIVE);
     private static final Pattern REGISTRATION =
             Pattern.compile("^(.*?REGISTRATION.*?)\\s*:?\\s*OPENS\\s+(.+)$", Pattern.CASE_INSENSITIVE);
     /**
@@ -36,6 +47,14 @@ public final class ScheduleBuilder {
     }
 
     public static Result build(List<RawRow> rows) {
+        return build(rows, LocalDate.now(SOURCE_ZONE));
+    }
+
+    /**
+     * @param today used to pick the year for day headers that don't print one: the year within one of
+     *              {@code today}'s whose calendar puts that date on the printed weekday
+     */
+    public static Result build(List<RawRow> rows, LocalDate today) {
         List<String> notes = new ArrayList<>();
         List<Day> days = new ArrayList<>();
         DayBuilder current = null;
@@ -45,7 +64,7 @@ public final class ScheduleBuilder {
                 if (current != null) {
                     days.add(current.build());
                 }
-                current = new DayBuilder(parseDate(row.fullText()), row.fullText());
+                current = new DayBuilder(parseDate(row.fullText(), today), row.fullText());
             } else if (current == null) {
                 notes.add(row.fullText());
             } else if (row.time().equalsIgnoreCase("TIME")) {
@@ -57,16 +76,52 @@ public final class ScheduleBuilder {
             }
         }
         if (current != null) {
+            // Untimed text after the last day's final event is a page footer, which applies to the whole schedule.
+            notes.addAll(current.takeTrailingNotes());
             days.add(current.build());
         }
         return new Result(List.copyOf(notes), List.copyOf(days));
     }
 
-    private static LocalDate parseDate(String header) {
+    private static LocalDate parseDate(String header, LocalDate today) {
+        String text = header.replaceAll("\\s+", " ");
         try {
-            return LocalDate.parse(header.replaceAll("\\s+", " "), DAY_HEADER);
-        } catch (DateTimeParseException e) {
-            throw new ScheduleParseException("Bad day header: \"" + header + "\"", e);
+            return LocalDate.parse(text, DAY_HEADER);
+        } catch (DateTimeParseException withYear) {
+            TemporalAccessor parsed;
+            try {
+                parsed = DAY_HEADER_NO_YEAR.parse(text);
+            } catch (DateTimeParseException e) {
+                throw new ScheduleParseException("Bad day header: \"" + header + "\"", e);
+            }
+            MonthDay monthDay = MonthDay.from(parsed);
+            DayOfWeek weekday = DayOfWeek.from(parsed);
+            // Weekdays shift by one or two each year, so at most one year in this window can match.
+            for (int year = today.getYear() - 1; year <= today.getYear() + 1; year++) {
+                if (monthDay.isValidYear(year) && monthDay.atYear(year).getDayOfWeek() == weekday) {
+                    return monthDay.atYear(year);
+                }
+            }
+            throw new ScheduleParseException("Day header \"" + header + "\" matches no year near " + today.getYear());
+        }
+    }
+
+    /** An "(Until 3:00 AM)" found in some text, and that text without it. */
+    private record Until(LocalTime time, String remainder) {
+        static Until find(String text) {
+            Matcher m = UNTIL.matcher(text);
+            while (m.find()) {
+                try {
+                    TimeParser.TimeRange range = TimeParser.parse(m.group(1));
+                    if (range.end() == null) {
+                        String remainder = (text.substring(0, m.start()) + text.substring(m.end())).strip();
+                        return new Until(range.start(), remainder);
+                    }
+                } catch (ScheduleParseException e) {
+                    // "(Until further notice)" and the like aren't end times; keep looking.
+                }
+            }
+            return null;
         }
     }
 
@@ -77,6 +132,7 @@ public final class ScheduleBuilder {
         private final List<String> notes = new ArrayList<>();
         private LocalDateTime previousStart;
         private int dayOffset;
+        private int notesBeforeLastEvent;
 
         DayBuilder(LocalDate date, String label) {
             this.date = date;
@@ -109,21 +165,43 @@ public final class ScheduleBuilder {
             }
             previousStart = start;
 
+            String[] lines = eventText.split("\n", 2);
+            String title = lines[0].strip();
+            String detail = lines.length > 1 ? lines[1].replace('\n', ' ').strip() : null;
+
+            LocalTime endTime = range.end();
+            if (endTime == null) {
+                // The end is printed in the text instead; drop it there, since it is in LA time and the site shows
+                // the end converted to the visitor's zone.
+                Until until = Until.find(title);
+                if (until != null) {
+                    title = until.remainder();
+                } else if (detail != null && (until = Until.find(detail)) != null) {
+                    detail = until.remainder().isEmpty() ? null : until.remainder();
+                }
+                endTime = until == null ? null : until.time();
+            }
             LocalDateTime end = null;
-            if (range.end() != null) {
-                end = start.toLocalDate().atTime(range.end());
+            if (endTime != null) {
+                end = start.toLocalDate().atTime(endTime);
                 if (!end.isAfter(start)) {
                     end = end.plusDays(1);
                 }
             }
 
-            String[] lines = eventText.split("\n", 2);
-            String title = lines[0].strip();
-            String detail = lines.length > 1 ? lines[1].replace('\n', ' ').strip() : null;
             if (title.isEmpty()) {
                 throw new ScheduleParseException("Empty event at " + timeText + " on " + label);
             }
             events.add(new Event(zoned(start), end == null ? null : zoned(end), title, detail, timeText));
+            notesBeforeLastEvent = notes.size();
+        }
+
+        /** Removes and returns the untimed rows that came after this day's last event. */
+        List<String> takeTrailingNotes() {
+            List<String> trailing = notes.subList(notesBeforeLastEvent, notes.size());
+            List<String> taken = List.copyOf(trailing);
+            trailing.clear();
+            return taken;
         }
 
         Day build() {

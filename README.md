@@ -10,7 +10,8 @@ schedule in each visitor's local time zone, and visitors can pick any other zone
 2. A small Java CLI:
    - finds the "WEEKEND SCHEDULE (PDF)" link on the schedules page (`SourceLocator`)
    - downloads the PDF
-   - rebuilds the two-column tables from the PDF's visible border lines (`RulingExtractor`, `PdfTableParser`)
+   - rebuilds the time/event tables from the PDF's visible cell borders (`RulingExtractor`, `PdfTableParser`); both the
+     original side-by-side weekend layout and the single-column "full schedule" layout are handled
    - turns the rows into dated events in `America/Los_Angeles` (`ScheduleBuilder`)
    - sanity-checks the result (`Validator`)
    - writes `site/schedule.json`

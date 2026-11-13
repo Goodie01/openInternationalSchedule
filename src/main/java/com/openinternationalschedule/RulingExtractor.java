@@ -15,9 +15,12 @@ import java.util.List;
 /**
  * Collects the visible, axis-aligned table border segments on a page.
  * <p>
- * Tabula also turns the edges of cell background fills into rulings, which puts phantom lines through merged cells.
- * Here only dark strokes (and dark hairline fills, another common way of drawing borders) count. Coordinates are
- * returned top-down like Tabula's, so they can be mixed with Tabula text positions.
+ * Tabula also turns the edges of every background fill into rulings, which puts phantom lines through merged cells.
+ * Here only dark strokes and dark hairline fills (another common way of drawing borders) count, plus one more
+ * pattern: a cell drawn as a light rectangle painted over a slightly offset dark rectangle of the same size, where
+ * the visible border is the dark sliver left showing. Such a light cell contributes its four edges. Plain light
+ * fills still don't. Coordinates are returned top-down like Tabula's, so they can be mixed with Tabula text
+ * positions.
  */
 final class RulingExtractor extends PDFGraphicsStreamEngine {
 
@@ -34,9 +37,13 @@ final class RulingExtractor extends PDFGraphicsStreamEngine {
     private static final float AXIS_TOLERANCE = 0.5f;
     private static final float HAIRLINE = 2f;
     private static final float DARK = 0.5f;
+    /** How far a dark backing rectangle may be offset from, or differ in size to, the light cell painted over it. */
+    private static final float BACKING_TOLERANCE = 2f;
 
     private final float pageTop;
     private final float pageLeft;
+    /** Dark filled rectangles painted since the last light fill, as {@code [minX, minY, maxX, maxY]}. */
+    private final List<float[]> darkRects = new ArrayList<>();
     private final List<float[]> pending = new ArrayList<>();
     private final List<Segment> horizontals = new ArrayList<>();
     private final List<Segment> verticals = new ArrayList<>();
@@ -111,18 +118,27 @@ final class RulingExtractor extends PDFGraphicsStreamEngine {
 
     @Override
     public void fillPath(int windingRule) {
-        if (isDark(getGraphicsState().getNonStrokingColor())) {
-            addHairlineFill();
-        }
+        addFill();
         reset();
     }
 
     @Override
     public void fillAndStrokePath(int windingRule) {
+        addFill();
+        strokePath();
+    }
+
+    private void addFill() {
         if (isDark(getGraphicsState().getNonStrokingColor())) {
             addHairlineFill();
+            float[] rect = pendingRectangle();
+            if (rect != null) {
+                darkRects.add(rect);
+            }
+        } else {
+            addBackedCell();
+            darkRects.clear();
         }
-        strokePath();
     }
 
     @Override
@@ -156,6 +172,47 @@ final class RulingExtractor extends PDFGraphicsStreamEngine {
             float x = (minX + maxX) / 2;
             addSegment(new float[]{x, minY, x, maxY});
         }
+    }
+
+    /** A light rectangle painted over a dark one of (nearly) the same size is a bordered cell. */
+    private void addBackedCell() {
+        float[] cell = pendingRectangle();
+        if (cell == null) {
+            return;
+        }
+        boolean backed = darkRects.stream().anyMatch(dark -> {
+            for (int i = 0; i < 4; i++) {
+                if (Math.abs(dark[i] - cell[i]) > BACKING_TOLERANCE) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        if (backed) {
+            pending.forEach(this::addSegment);
+        }
+    }
+
+    /** The pending path as {@code [minX, minY, maxX, maxY]} if it is a single axis-aligned rectangle, else null. */
+    private float[] pendingRectangle() {
+        if (pending.size() != 4 || !pending.stream().allMatch(RulingExtractor::isAxisAligned)) {
+            return null;
+        }
+        float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, minY = Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (float[] s : pending) {
+            minX = Math.min(minX, Math.min(s[0], s[2]));
+            maxX = Math.max(maxX, Math.max(s[0], s[2]));
+            minY = Math.min(minY, Math.min(s[1], s[3]));
+            maxY = Math.max(maxY, Math.max(s[1], s[3]));
+        }
+        if (maxX - minX <= HAIRLINE || maxY - minY <= HAIRLINE) {
+            return null;
+        }
+        return new float[]{minX, minY, maxX, maxY};
+    }
+
+    private static boolean isAxisAligned(float[] s) {
+        return Math.abs(s[0] - s[2]) <= AXIS_TOLERANCE || Math.abs(s[1] - s[3]) <= AXIS_TOLERANCE;
     }
 
     private void addSegment(float[] s) {
